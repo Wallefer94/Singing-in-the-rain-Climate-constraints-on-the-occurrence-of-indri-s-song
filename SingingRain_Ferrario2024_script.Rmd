@@ -1,0 +1,410 @@
+---
+title: "Singing in the rain! Climate constraints on the occurrence of indri’s song"
+author: "Valeria Ferrario"
+date: "2024-04-30"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+pacman::p_load(ggpubr,ggplot2, dplyr, tidyr, tidyverse,geosphere, sjPlot,gridExtra, 
+               lubridate,bbmle,stringr,ggsci,suncalc, lunar, lme4,plyr,bbmle,stringr,
+               MuMIn, car, sp, gstat, cowplot, coefplot, ggrepel)
+```
+
+Read dataset with the detections from the automated detection algorithm and the one with the detections of the weather station
+```{r}
+
+indri.dat <- read.csv("/Volumes/V/SCRIPT/Indri_rain/indri_detections.csv")
+
+meteo_united <- read.csv("/Volumes/V/SCRIPT/Indri_rain/meteo/Meteo_united_vr3.csv")
+meteo_united <- meteo_united %>% mutate(datetime = as.POSIXct(datetime, format="%d/%m/%Y %H:%M", tz="UTC")) %>% arrange(datetime) %>% na.omit() %>% mutate(date = format(datetime, "%Y-%m-%d"))
+```
+
+Extract 'period' as the time span going from 6 a.m. for the next 24 hours, 
+if you don't have this variable already in the dataset
+```{r}
+
+meteo_united <- meteo_united %>% mutate(datetime = as.POSIXct(datetime), period = as.integer(difftime(datetime, floor_date(min(datetime), "day") + hours(6), units = "hours") / 24) + 1)
+
+```
+
+Read dataset with coordinates 
+
+```{r}
+
+coordinates <- read.csv("/Volumes/V/SCRIPT/Indri_rain/coordinates_rain.csv") %>% select(-X) %>% distinct()
+```
+
+PART 1: Influence of environmental variables on indri song events
+
+Convert 'date' and 'hours' columns to character and create 'date_h' column
+```{r}
+
+indri_part1 <- indri.dat
+indri_part1$date <- as.character(indri_part1$date)
+indri_part1$date_h <- paste0(indri_part1$hours, "_", indri_part1$date)
+
+meteo_part1 <- meteo_united
+meteo_part1$hours <- as.POSIXlt(meteo_part1$datetime)$hour
+meteo_part1$date <- as.character(meteo_part1$date)
+meteo_part1$date_h <- paste0(meteo_part1$hours, "_", meteo_part1$date)
+
+# Merge datasets by 'date_h'
+events <- merge(indri_part1, meteo_part1, by="date_h" )
+
+# Remove unnecessary columns from 'events'
+events <- events %>% select(-datetime.y, -date.y, -hours.y )
+
+# Aggregate data and calculate mean for specific columns
+columns_to_mean <- events[, c("song")]
+
+events1 <- aggregate(columns_to_mean,by = list(period = events$period,place = events$place,rain = events$rain_sum, temp_night = events$night_temp_mean, temp_day = events$day_temp_mean, night_rain = events$night_rain_sum, recorder = events$recorder, temp = events$temp_mean, date = events$date.x), FUN = mean)
+
+# Convert 'x' column to binary 'bin.detections' column
+events1$bin.detections <- as.integer(ifelse(events1$x== 0, 0, 1))
+
+# Scale numeric variables
+events1$rain_scaled <- scale(events1$rain)
+events1$temp_scaled <- scale(events1$temp)
+events1$night_rain_scaled <- scale(events1$night_rain)
+
+# Convert 'date' to Date class and create 'year' column
+events1$date <- as.Date(events1$date)
+events1$year <-  as.factor(format(events1$date, "%Y"))
+
+
+# Models
+song.aggregate.intercept <- glmer(bin.detections ~ (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night <- glmer(bin.detections ~ night_rain_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.rain <- glmer(bin.detections ~ rain_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.temp <- glmer(bin.detections ~ temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night.rain <- glmer(bin.detections ~ night_rain_scaled + rain_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night.temp <- glmer(bin.detections ~ night_rain_scaled + temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.rain.temp <- glmer(bin.detections ~ rain_scaled + temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night.rain.temp <- glmer(bin.detections ~ night_rain_scaled + rain_scaled + temp_scaled + year + (1|recorder) + (1|period) ,data=events1, family = "binomial")
+
+song.aggregate.night_rain <- glmer(bin.detections ~ night_rain_scaled * rain_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night_temp <- glmer(bin.detections ~ night_rain_scaled * temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.rain_temp <- glmer(bin.detections ~ rain_scaled * temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+song.aggregate.night_rain_temp <- glmer(bin.detections ~ night_rain_scaled * rain_scaled * temp_scaled + year + (1|recorder) + (1|period),data = events1, family = "binomial",   control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+
+song.aggregate.night.rain_temp <- glmer(bin.detections ~ night_rain_scaled + rain_scaled * temp_scaled + year + (1|recorder) + (1|period), data=events1, family = "binomial")
+
+# AIC Comparison
+AICtab(song.aggregate.intercept, song.aggregate.night, song.aggregate.rain, song.aggregate.temp,song.aggregate.night.rain, song.aggregate.night.temp, song.aggregate.rain.temp, song.aggregate.night.rain.temp, song.aggregate.night_rain, song.aggregate.night_temp, song.aggregate.rain_temp, song.aggregate.night_rain_temp, song.aggregate.night.rain_temp, weights=T, base=T)
+
+```
+
+```{r}
+# Model Summaries
+summary(song.aggregate.night.rain.temp)
+summary(song.aggregate.rain_temp)
+summary(song.aggregate.night.rain_temp)
+summary(song.aggregate.rain.temp)
+
+```
+
+```{r}
+# VIF Check
+VIF <- events1
+VIF$bin.detections <- as.numeric(VIF$bin.detections)
+predictor_vars <- c("temp", "rain", "night_rain")
+lm_model <- lm(bin.detections ~ ., data = VIF[, c("bin.detections", predictor_vars)])
+car::vif(lm_model)
+```
+
+
+
+
+PART 2: Influence of environmental variables on indri-singing events (count)
+```{r}
+
+count_ds <- events %>% select(datetime.x, song) %>% group_by(datetime = datetime.x) %>% dplyr::summarize(song_count = sum(song)) %>% mutate(song = ifelse(song_count > 1, 1, 0))
+
+count_ds$datetime <- as.POSIXct(count_ds$datetime, format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+c_meteo_ds <- merge(count_ds, meteo_united, by = c("datetime"))
+
+c_meteo_ds$year <- format(c_meteo_ds$datetime, "%Y")
+
+c_meteo_ds <- c_meteo_ds %>% group_by(period,year, max_temp, min_temp, rain =rain_sum, night_rain =night_rain_sum, night_temp = night_temp_mean,day_temp=day_temp_mean) %>% dplyr::summarise( songs = sum(song), temp = mean(temp)) %>% na.omit()
+
+# Scaling variables
+c_meteo_ds$rain_scaled <- scale(c_meteo_ds$rain)
+c_meteo_ds$temp_scaled <- scale(c_meteo_ds$temp)
+c_meteo_ds$night_rain_scaled <- scale(c_meteo_ds$night_rain)
+
+# Models 
+mod.intercept <- glmer(songs ~ (1|period), data=c_meteo_ds,family=poisson)
+
+mod.night <- glmer(songs ~ night_rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain <- glmer(songs ~ rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.temp <- glmer(songs ~ temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain.night <- glmer(songs ~ rain_scaled + night_rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.night.temp <- glmer(songs ~ night_rain_scaled + temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain.temp <- glmer(songs ~ rain_scaled + temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.night.rain.temp <- glmer(songs ~ temp_scaled + night_rain_scaled + rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain_night <- glmer(songs ~ rain_scaled * night_rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.night_temp <- glmer(songs ~ night_rain_scaled * temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain_temp <- glmer(songs ~ rain_scaled * temp_scaled  + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.night_rain_temp <- glmer(songs ~ night_rain_scaled * rain_scaled * temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))) 
+
+mod.temp_night.rain <- glmer(songs ~ temp_scaled * night_rain_scaled + rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.temp_rain.night <- glmer(songs ~ temp_scaled * rain_scaled + night_rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.rain_night.temp <- glmer(songs ~ temp_scaled + night_rain_scaled * rain_scaled + year + (1|period), data=c_meteo_ds, family=poisson, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+
+mod.night.rain_temp <- glmer(songs ~ night_rain_scaled + rain_scaled * temp_scaled + year + (1|period), data=c_meteo_ds, family=poisson)
+
+mod.night_temp.rain <- glmer(songs ~ night_rain_scaled * temp_scaled + rain_scaled  + year + (1|period), data=c_meteo_ds, family=poisson)
+
+# AIC comparison
+AICtab(mod.intercept, mod.night, mod.rain, mod.temp, mod.rain.night, mod.night.temp, mod.rain.temp,mod.night.rain.temp, mod.night.rain_temp, mod.night_temp.rain, mod.rain_night, mod.night_temp, mod.rain_temp, mod.night_rain_temp, base= T, weights=T)
+
+# Summarise model
+summary(mod.night_temp.rain)
+
+# Check VIF 
+VIF <- c_meteo_ds
+VIF$song_count <- as.numeric(VIF$songs)
+predictor_vars <- c(  "temp_scaled", "rain_scaled", "night_rain")
+lm_model <- lm(songs ~ ., data = VIF[, c("songs", predictor_vars)])
+car::vif(lm_model)
+```
+
+
+
+PART 3: Influence of environmental variables on song timing
+
+```{R}
+# -------------------------------
+
+# Merge timing_half and coordinates by "recorder"
+timing <- merge(events, coordinates, by = "recorder")
+
+# Select specific columns
+timing <- timing %>% select(recorder, date =date.x, file, datetime = datetime.x, period, rain, song, place=place.x,  time, meteostation, temp, temp_mean, rain_sum, max_temp, min_temp, night_rain_sum, night_temp_mean, day_temp_mean, ALT , N , E)
+
+# Process the date column
+timing$datetime <- as.POSIXct(timing$datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+timing$date <- as.Date(timing$datetime)
+timing$time <- format(timing$datetime, "%H:%M:%S")
+
+# Remove duplicated rows
+timing <- timing[!duplicated(timing), ]
+
+# Calculate nautical dawn
+nautical_dawn <- c()
+
+for (i in 1:nrow(timing)) {nautical_dawn <- c(nautical_dawn, suncalc::getSunlightTimes(date = timing$date[i],lat = timing$N[i],lon = timing$E[i])$nauticalDawn)}
+
+
+# Add nautical dawn to timing data frame
+timing$nautical_dawn <- nautical_dawn
+timestamp <- timing$nautical_dawn
+
+# Convert nautical dawn to POSIXct
+timing$dawn_time <- as.POSIXct(timestamp, origin = "1970-01-01", tz="UTC")
+
+# Add 3 hours to dawn_time
+timing$dawn_time <- timing$dawn_time + hours(3)
+timing$minutes.til.dawn <- as.numeric(difftime(timing$datetime, timing$dawn_time, units = "mins"))
+
+# Determine lunar phase
+timing$lunar_phase <- lunar.phase(timing$date)
+timing$lunar_phase <- cut(timing$lunar_phase, breaks = c(-Inf, 1.570796, 3.141593, 4.712389, Inf), labels = c("New", "Waxing", "Full", "Waning"))
+
+# Select relevant columns and filter out rows with song = "0"
+timing <- timing %>% select(minutes.til.dawn, period, song, recorder, meteostation, datetime, min_temp, night_rain =night_rain_sum, rain = rain_sum, temp = temp_mean, temp_night=night_temp_mean, 
+lunar_phase, temp_day=day_temp_mean) %>% filter(song != "0")
+
+# Convert factors
+timing$recorder <- as.factor(timing$recorder)
+timing$lunar_phase <- as.factor(timing$lunar_phase)
+
+# Scale variables
+timing$rain_scaled <- scale(timing$rain)
+timing$temp_scaled <- scale(timing$temp)
+timing$night_rain_scaled <- scale(timing$night_rain)
+timing$minutes.til.dawn.sc <- scale(timing$minutes.til.dawn)
+
+# Models
+song.timing.intercept <- lmer(minutes.til.dawn.sc ~ (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.night <- lmer(minutes.til.dawn.sc ~ night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.rain <- lmer(minutes.til.dawn.sc ~ rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.temp <- lmer(minutes.til.dawn.sc ~ temp_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar <- lmer(minutes.til.dawn.sc ~ lunar_phase + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.rain.night.temp <- lmer(minutes.til.dawn.sc ~ rain_scaled + night_rain_scaled + temp_scaled + (1|period) + (1|recorder), data = timing, REML = F)
+
+song.timing.temp.rain <- lmer(minutes.til.dawn.sc ~ temp_scaled + rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + rain_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.temp <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.night <- lmer(minutes.til.dawn.sc ~ lunar_phase + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.night.temp <- lmer(minutes.til.dawn.sc ~ temp_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.temp_rain <- lmer(minutes.til.dawn.sc ~ temp_scaled * rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.rain_night.temp <- lmer(minutes.til.dawn.sc ~ rain_scaled * night_rain_scaled + temp_scaled + (1|period) + (1|recorder), data = timing, REML = F)
+
+song.timing.rain_scaled.night_temp <- lmer(minutes.til.dawn.sc ~ rain_scaled + night_rain_scaled * temp_scaled + (1|period) + (1|recorder), data = timing, REML = F)
+
+song.timing.rain <- lmer(minutes.til.dawn.sc ~ rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + rain_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.temp_rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled * rain_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.temp.rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + rain_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.temp_rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled * rain_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_temp_rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled * rain_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + rain_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_temp_rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled * rain_scaled + night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_temp <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_rain <- lmer(minutes.til.dawn.sc ~ lunar_phase * rain_scaled  + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar.rain <- lmer(minutes.til.dawn.sc ~ lunar_phase + rain_scaled  + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.lunar_night <- lmer(minutes.til.dawn.sc ~ lunar_phase * night_rain_scaled  + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.night_temp <- lmer(minutes.til.dawn.sc ~ temp_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.rain_night <- lmer(minutes.til.dawn.sc ~ rain_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.night_temp <- lmer(minutes.til.dawn.sc ~ night_rain_scaled * temp_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+song.timing.temp_night <- lmer(minutes.til.dawn.sc ~ temp_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing, REML = F)
+
+# AIC Comparison
+AICtab(song.timing.intercept,song.timing.night, song.timing.rain, song.timing.temp, song.timing.lunar, song.timing.rain.night.temp, song.timing.night.temp, song.timing.temp.rain, song.timing.lunar.temp.rain.night, song.timing.lunar.temp, song.timing.lunar.rain, song.timing.lunar.night, song.timing.night_temp, song.timing.rain_night.temp, song.timing.lunar_temp.rain.night, song.timing.lunar.temp_rain.night, song.timing.lunar.temp.rain_night, song.timing.lunar.temp_rain_night, song.timing.lunar_temp_rain_night, song.timing.lunar_temp, song.timing.lunar_rain, song.timing.lunar_night, song.timing.rain_night,song.timing.temp_rain, weights=T, base=T)
+
+# Model Summaries
+summary(song.timing.temp.rain)
+summary(song.timing.temp_rain)
+```
+
+
+```{R}
+
+# Create a dataset with the data centred in the morning (before 14)
+timing_morning <- timing %>% filter(minutes.til.dawn < 581.7)
+
+# Scale variables
+timing_morning$rain_scaled <- scale(timing_morning$rain)
+timing_morning$temp_scaled <- scale(timing_morning$temp)
+timing_morning$night_rain_scaled <- scale(timing_morning$night_rain)
+timing_morning$minutes.til.dawn.sc <- scale(timing_morning$minutes.til.dawn)
+
+# Models
+song.timing.intercept <- lmer(minutes.til.dawn.sc ~ (1|recorder) +(1|period), data = timing_morning, REML = F)
+
+song.timing.night <- lmer(minutes.til.dawn.sc ~ night_rain_scaled  + (1|recorder) +(1|period), data = timing_morning, REML = F)
+
+song.timing.rain <- lmer(minutes.til.dawn.sc ~ rain_scaled + (1|recorder)+(1|period) , data = timing_morning, REML = F)
+
+song.timing.temp <- lmer(minutes.til.dawn.sc ~ temp_scaled +(1|recorder) + (1|period), data = timing_morning, REML = F)
+
+song.timing.lunar <- lmer(minutes.til.dawn.sc ~ lunar_phase + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.rain.night.temp <- lmer(minutes.til.dawn.sc ~ rain_scaled + night_rain_scaled + temp_scaled +(1|period) +(1|recorder), data = timing_morning, REML = F)
+
+song.timing.temp.rain <- lmer(minutes.til.dawn.sc ~ temp_scaled + rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + rain_scaled + night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.temp <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.rain <- lmer(minutes.til.dawn.sc ~ lunar_phase * rain_scaled  + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.night <- lmer(minutes.til.dawn.sc ~ lunar_phase  + night_rain_scaled  + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.night.temp <- lmer(minutes.til.dawn.sc ~ temp_scaled + night_rain_scaled +(1|recorder) + (1|period), data = timing_morning, REML = F)
+
+song.timing.temp_rain <- lmer(minutes.til.dawn.sc ~ temp_scaled * rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.rain_night.temp <- lmer(minutes.til.dawn.sc ~ rain_scaled * night_rain_scaled + temp_scaled +(1|period) +(1|recorder), data = timing_morning, REML = F)
+
+song.timing.rain.night_temp <- lmer(minutes.til.dawn.sc ~ rain_scaled + night_rain_scaled * temp_scaled +(1|period) +(1|recorder), data = timing_morning, REML = F)
+
+song.timing.rain <- lmer(minutes.til.dawn.sc ~ rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + rain_scaled + night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.temp_rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled * rain_scaled + night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.temp.rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled + rain_scaled * night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar.temp_rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase + temp_scaled * rain_scaled * night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_temp_rain_night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled * rain_scaled * night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_temp.rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + rain_scaled + night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_temp_rain.night <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled * rain_scaled + night_rain_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_temp <- lmer(minutes.til.dawn.sc ~ lunar_phase * temp_scaled + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_rain <- lmer(minutes.til.dawn.sc ~ lunar_phase * rain_scaled  + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.lunar_night <- lmer(minutes.til.dawn.sc ~ lunar_phase * night_rain_scaled  + (1|recorder)+(1|period), data = timing_morning, REML = F)
+
+song.timing.night_temp <- lmer(minutes.til.dawn.sc ~ temp_scaled * night_rain_scaled +(1|recorder) + (1|period), data = timing_morning, REML = F)
+
+song.timing.rain_night <- lmer(minutes.til.dawn.sc ~ rain_scaled * night_rain_scaled + (1|recorder) + (1|period), data = timing_morning, REML = F)
+
+song.timing.night_temp <- lmer(minutes.til.dawn.sc ~ night_rain_scaled * temp_scaled + (1|recorder) + (1|period), data = timing_morning, REML = F)
+
+song.timing.rain.lunar.temp <- lmer(minutes.til.dawn.sc ~ night_rain_scaled + lunar_phase + temp_scaled + (1|recorder) + (1|period), data = timing_morning, REML = F)
+
+# AIC comparison
+AICtab(song.timing.intercept, song.timing.night, song.timing.rain, song.timing.temp, song.timing.lunar,song.timing.rain.night.temp, song.timing.temp.rain, song.timing.lunar.temp.rain.night, song.timing.lunar.temp,song.timing.lunar.rain, song.timing.lunar.night, song.timing.night_temp, song.timing.rain_night.temp, song.timing.rain.night_temp, song.timing.lunar_temp.rain.night, song.timing.lunar.temp_rain.night, song.timing.lunar.temp.rain_night, song.timing.lunar.temp_rain_night, song.timing.lunar_temp_rain_night, song.timing.lunar_temp, song.timing.lunar_rain, song.timing.lunar_night, song.timing.rain.lunar.temp, song.timing.rain_night, song.timing.temp_rain, weights=T, base=T)
+
+# Model Summaries
+summary(song.timing.rain)
+
+# VIF Check
+VIF <- prova_timing
+predictor_vars <- c("temp_night", "temp_day", "night_rain")
+lm_model <- lm(minutes.til.dawn ~ ., data = VIF[, c("minutes.til.dawn", predictor_vars)])
+car::vif(lm_model)
+
+```
